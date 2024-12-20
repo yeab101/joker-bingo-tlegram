@@ -71,33 +71,25 @@ async function initializeTransaction(amount, first_name, phone_number, chatId, b
     });
 }
 
-async function initiateWithdraw(amount, account_name, account_number, chatId, bot, userId, bankCode) {
-    // First, verify the bank account
+async function verifyTransfer(reference) {
     const verifyOptions = {
         'method': 'GET',
-        'url': `https://api.chapa.co/v1/bank/verify?account_number=${account_number}&bank_code=${bankCode}`,
+        'url': `https://api.chapa.co/v1/transfers/verify/${reference}`,
         'headers': {
-            'Authorization': `Bearer ${process.env.CHAPASECRET}`,
-            'Content-Type': 'application/json'
+            'Authorization': `Bearer ${process.env.CHAPASECRET}`
         }
     };
 
-    try {
-        // Verify bank account first
-        const verifyResponse = await new Promise((resolve, reject) => {
-            request(verifyOptions, (error, response) => {
-                if (error) reject(error);
-                else resolve(response);
-            });
+    return new Promise((resolve, reject) => {
+        request(verifyOptions, (error, response) => {
+            if (error) reject(error);
+            else resolve(JSON.parse(response.body));
         });
+    });
+}
 
-        const verifyData = JSON.parse(verifyResponse.body);
-        
-        if (verifyData.status !== 'success') {
-            throw new Error(verifyData.message || 'Bank account verification failed');
-        }
-
-        // If verification successful, proceed with transfer
+async function initiateWithdraw(amount, account_name, account_number, chatId, bot, userId, bankCode) {
+    try {
         const reference = crypto.randomBytes(8).toString('hex');
         const transferOptions = {
             'method': 'POST',
@@ -113,7 +105,7 @@ async function initiateWithdraw(amount, account_name, account_number, chatId, bo
                 "currency": "ETB",
                 "reference": reference,
                 "bank_code": bankCode,
-                "beneficiary_name": verifyData.data.account_name // Use verified name from bank
+                "beneficiary_name": account_name
             })
         };
 
@@ -132,6 +124,12 @@ async function initiateWithdraw(amount, account_name, account_number, chatId, bo
 
                     if (responseBody.status === "success") {
                         try {
+                            // Verify the transfer
+                            const verifyResult = await verifyTransfer(reference);
+                            if (verifyResult.status !== "success") {
+                                throw new Error("Transfer verification failed");
+                            }
+
                             // Update user balance in database
                             const user = await User.findById(userId);
                             if (!user) {
@@ -145,7 +143,7 @@ async function initiateWithdraw(amount, account_name, account_number, chatId, bo
                                 transactionId: reference,
                                 chatId: chatId,
                                 amount: amount,
-                                status: 'success',
+                                status: verifyResult.data.status,
                                 type: 'withdrawal'
                             });
 
@@ -155,18 +153,23 @@ async function initiateWithdraw(amount, account_name, account_number, chatId, bo
                             await user.save();
                             await transaction.save();
 
-                            bot.sendMessage(chatId, `✅ Withdrawal of ${amount} ETB successful!\nNew balance: ${user.balance} ETB`);
+                            bot.sendMessage(chatId, 
+                                `✅ Withdrawal of ${amount} ETB ${verifyResult.data.status}!\n` +
+                                `Bank: ${verifyResult.data.bank_name}\n` +
+                                `Account: ${account_number}\n` +
+                                `Reference: ${reference}\n` +
+                                `New balance: ${user.balance} ETB`
+                            );
                             resolve(responseBody);
                         } catch (dbError) {
-                            console.error("Database error:", dbError);
+                            console.error("Database or verification error:", dbError);
                             bot.sendMessage(chatId, "❌ Error processing withdrawal. Please contact support.");
                             reject(dbError);
                         }
                     } else {
-                        // Handle specific error cases
-                        let errorMessage = "Withdrawal request failed.";
+                        let errorMessage = "❌ Withdrawal request failed.";
                         if (responseBody.message === "Insufficient Balance") {
-                            errorMessage = "❌ Sorry, this service is temporarily unavailable. Please try again later or contact support.";
+                            errorMessage = "❌ Service temporarily unavailable. Please try again later.";
                         } else if (responseBody.message) {
                             errorMessage = `❌ ${responseBody.message}`;
                         }
@@ -181,14 +184,15 @@ async function initiateWithdraw(amount, account_name, account_number, chatId, bo
                 }
             });
         });
-    } catch (verifyError) {
-        console.error("Bank account verification error:", verifyError);
-        bot.sendMessage(chatId, `❌ Bank account verification failed. Please try again. Error: ${verifyError.message}`);
-        return Promise.reject(verifyError);
+    } catch (error) {
+        console.error("Withdrawal error:", error);
+        bot.sendMessage(chatId, "❌ An unexpected error occurred. Please try again.");
+        return Promise.reject(error);
     }
 }
 
 module.exports = {
     initializeTransaction,
-    initiateWithdraw
+    initiateWithdraw,
+    verifyTransfer
 };
