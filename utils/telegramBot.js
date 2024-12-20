@@ -31,7 +31,7 @@ const commandHandlers = {
           [{ text: "Balance 💰", callback_data: "balance" }, { text: "Deposit 💸", callback_data: "deposit" }],
           [{ text: "Withdraw 💁‍♂️", callback_data: "withdraw" }, { text: "Transfer Balance 💳", callback_data: "transfer" }],
           [{ text: "Instructions ℹ️", web_app: { url: `${baseUrl}/how-to-play` } }, { text: "History 📜", callback_data: "history" }],
-          [{ text: "Join Group 👥", url: "https://t.me/jokerbingo_bot_group" }]
+          [{ text: "Join Group 👥", url: "https://t.me/jokerbingo_bot_group" },  { text: "Game History 📜", callback_data: "gamesHistory" }]
         ]
       }
     });

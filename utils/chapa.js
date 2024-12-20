@@ -72,96 +72,124 @@ async function initializeTransaction(amount, first_name, phone_number, chatId, b
 }
 
 async function initiateWithdraw(amount, account_name, account_number, chatId, bot, userId, bankCode) {
-    const reference = crypto.randomBytes(8).toString('hex');
-    console.log(`Initializing withdrawal for chat ID ${chatId}:`, {
-        amount,
-        account_name,
-        account_number,
-        reference,
-        bankCode
-    });
-
-    const options = {
+    // First, verify the bank account
+    const verifyOptions = {
         'method': 'POST',
-        'url': 'https://api.chapa.co/v1/transfers',
+        'url': 'https://api.chapa.co/v1/bank/verify',
         'headers': {
             'Authorization': `Bearer ${process.env.CHAPASECRET}`,
             'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-            "account_name": account_name,
             "account_number": account_number,
-            "amount": amount.toString(),
-            "currency": "ETB",
-            "reference": reference,
             "bank_code": bankCode
         })
     };
 
-    return new Promise((resolve, reject) => {
-        request(options, async function (error, response) {
-            if (error) {
-                console.error("Error initiating withdrawal:", error);
-                bot.sendMessage(chatId, "❌ There was an error processing your withdrawal. Please try again.");
-                reject(error);
-                return;
-            }
+    try {
+        // Verify bank account first
+        const verifyResponse = await new Promise((resolve, reject) => {
+            request(verifyOptions, (error, response) => {
+                if (error) reject(error);
+                else resolve(response);
+            });
+        });
 
-            try {
-                const responseBody = JSON.parse(response.body);
-                console.log(`Withdrawal response for reference ${reference}:`, responseBody);
+        const verifyData = JSON.parse(verifyResponse.body);
+        
+        if (verifyData.status !== 'success') {
+            throw new Error(verifyData.message || 'Bank account verification failed');
+        }
 
-                if (responseBody.status === "success") {
-                    try {
-                        // Update user balance in database
-                        const user = await User.findById(userId);
-                        if (!user) {
-                            bot.sendMessage(chatId, "User not found.");
-                            reject(new Error("User not found"));
-                            return;
+        // If verification successful, proceed with transfer
+        const reference = crypto.randomBytes(8).toString('hex');
+        const transferOptions = {
+            'method': 'POST',
+            'url': 'https://api.chapa.co/v1/transfers',
+            'headers': {
+                'Authorization': `Bearer ${process.env.CHAPASECRET}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                "account_name": account_name,
+                "account_number": account_number,
+                "amount": amount.toString(),
+                "currency": "ETB",
+                "reference": reference,
+                "bank_code": bankCode,
+                "beneficiary_name": verifyData.data.account_name // Use verified name from bank
+            })
+        };
+
+        return new Promise((resolve, reject) => {
+            request(transferOptions, async function (error, response) {
+                if (error) {
+                    console.error("Error initiating withdrawal:", error);
+                    bot.sendMessage(chatId, "❌ There was an error processing your withdrawal. Please try again.");
+                    reject(error);
+                    return;
+                }
+
+                try {
+                    const responseBody = JSON.parse(response.body);
+                    console.log(`Withdrawal response for reference ${reference}:`, responseBody);
+
+                    if (responseBody.status === "success") {
+                        try {
+                            // Update user balance in database
+                            const user = await User.findById(userId);
+                            if (!user) {
+                                bot.sendMessage(chatId, "User not found.");
+                                reject(new Error("User not found"));
+                                return;
+                            }
+
+                            // Create withdrawal transaction record
+                            const transaction = new Transaction({
+                                transactionId: reference,
+                                chatId: chatId,
+                                amount: amount,
+                                status: 'success',
+                                type: 'withdrawal'
+                            });
+
+                            // Deduct from user's balance
+                            user.balance -= Number(amount);
+                            
+                            await user.save();
+                            await transaction.save();
+
+                            bot.sendMessage(chatId, `✅ Withdrawal of ${amount} ETB successful!\nNew balance: ${user.balance} ETB`);
+                            resolve(responseBody);
+                        } catch (dbError) {
+                            console.error("Database error:", dbError);
+                            bot.sendMessage(chatId, "❌ Error processing withdrawal. Please contact support.");
+                            reject(dbError);
+                        }
+                    } else {
+                        // Handle specific error cases
+                        let errorMessage = "Withdrawal request failed.";
+                        if (responseBody.message === "Insufficient Balance") {
+                            errorMessage = "❌ Sorry, this service is temporarily unavailable. Please try again later or contact support.";
+                        } else if (responseBody.message) {
+                            errorMessage = `❌ ${responseBody.message}`;
                         }
 
-                        // Create withdrawal transaction record
-                        const transaction = new Transaction({
-                            transactionId: reference,
-                            chatId: chatId,
-                            amount: amount,
-                            status: 'success',
-                            type: 'withdrawal'
-                        });
-
-                        // Deduct from user's balance
-                        user.balance -= Number(amount);
-                        
-                        await user.save();
-                        await transaction.save();
-
-                        bot.sendMessage(chatId, `✅ Withdrawal of ${amount} ETB successful!\nNew balance: ${user.balance} ETB`);
-                        resolve(responseBody);
-                    } catch (dbError) {
-                        console.error("Database error:", dbError);
-                        bot.sendMessage(chatId, "❌ Error processing withdrawal. Please contact support.");
-                        reject(dbError);
+                        bot.sendMessage(chatId, errorMessage);
+                        reject(new Error(responseBody.message || "Withdrawal failed"));
                     }
-                } else {
-                    // Handle specific error cases
-                    let errorMessage = "Withdrawal request failed.";
-                    if (responseBody.message === "Insufficient Balance") {
-                        errorMessage = "❌ Sorry, this service is temporarily unavailable. Please try again later or contact support.";
-                    } else if (responseBody.message) {
-                        errorMessage = `❌ ${responseBody.message}`;
-                    }
-
-                    bot.sendMessage(chatId, errorMessage);
-                    reject(new Error(responseBody.message || "Withdrawal failed"));
+                } catch (parseError) {
+                    console.error(`Parse error for reference ${reference}:`, parseError);
+                    bot.sendMessage(chatId, "❌ There was an error processing your withdrawal. Please try again.");
+                    reject(parseError);
                 }
-            } catch (parseError) {
-                console.error(`Parse error for reference ${reference}:`, parseError);
-                bot.sendMessage(chatId, "❌ There was an error processing your withdrawal. Please try again.");
-                reject(parseError);
-            }
+            });
         });
-    });
+    } catch (verifyError) {
+        console.error("Bank account verification error:", verifyError);
+        bot.sendMessage(chatId, `❌ Bank account verification failed. Please try again. Error: ${verifyError.message}`);
+        return Promise.reject(verifyError);
+    }
 }
 
 module.exports = {
