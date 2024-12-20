@@ -74,16 +74,12 @@ async function initializeTransaction(amount, first_name, phone_number, chatId, b
 async function initiateWithdraw(amount, account_name, account_number, chatId, bot, userId, bankCode) {
     // First, verify the bank account
     const verifyOptions = {
-        'method': 'POST',
-        'url': 'https://api.chapa.co/v1/bank/verify',
+        'method': 'GET',
+        'url': `https://api.chapa.co/v1/bank/verify?account_number=${account_number}&bank_code=${bankCode}`,
         'headers': {
             'Authorization': `Bearer ${process.env.CHAPASECRET}`,
             'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-            "account_number": account_number,
-            "bank_code": bankCode
-        })
+        }
     };
 
     try {
